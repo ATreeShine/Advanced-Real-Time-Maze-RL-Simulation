@@ -19,14 +19,16 @@ import torch.optim as optim
 # ---------------------------
 # Global Configurations
 # ---------------------------
-cell_size = 10  # smaller cell size for higher resolution track
-grid_width, grid_height = 51, 51  # Use odd numbers for symmetry.
+cell_size = 10  # cell size for drawing
+grid_width, grid_height = 51, 51  # odd dimensions for symmetry.
 grid_pixel_width = grid_width * cell_size
 grid_pixel_height = grid_height * cell_size
 hidden_panel_width = 200         # Panel to visualize hidden activations.
 info_panel_height = 40           # Extra vertical space for text.
 total_width = grid_pixel_width + hidden_panel_width
 total_height = grid_pixel_height + info_panel_height
+
+NUM_CARS = 2  # number of simultaneous agents
 
 # Global variable to hold the current frame (as a base64 PNG string)
 current_frame = None
@@ -39,45 +41,41 @@ class RaceTrack:
     def __init__(self, width, height):
         self.width = width
         self.height = height
-        # Create a grid representing the environment.
-        # Each cell will be marked as:
-        # 'R' for road, '#' for off-road, and 'S' for start line.
+        # Create grid: 'R' for road, '#' for off-road, 'S' for start.
         self.grid = [['#' for _ in range(width)] for _ in range(height)]
         self.generate_track()
 
     def generate_track(self):
         cx, cy = self.width // 2, self.height // 2
-        # Define track parameters.
         self.track_radius = min(cx, cy) - 3
         road_width = 6
         inner_radius = self.track_radius - road_width // 2
         outer_radius = self.track_radius + road_width // 2
         for r in range(self.height):
             for c in range(self.width):
-                # Compute distance from center (using cell center coordinates).
                 dx = c - cx + 0.5
                 dy = r - cy + 0.5
                 dist = math.sqrt(dx*dx + dy*dy)
                 if inner_radius <= dist <= outer_radius:
                     self.grid[r][c] = 'R'
-        # Mark the start line. Here we choose the top of the circle.
+        # Mark the start line (top of circle)
         start_r = cy - self.track_radius
         start_c = cx
         self.grid[start_r][start_c] = 'S'
         self.start = (start_r, start_c)
 
     def draw(self, surface):
-        # Draw the track on the given Pygame surface.
+        # Draw the grid onto the provided surface.
         for r in range(self.height):
             for c in range(self.width):
                 rect = pygame.Rect(c * cell_size, r * cell_size, cell_size, cell_size)
                 cell = self.grid[r][c]
                 if cell == '#':
-                    color = (34, 139, 34)  # Off-road: Forest Green
+                    color = (34, 139, 34)  # off-road: Forest Green
                 elif cell == 'R':
-                    color = (169, 169, 169)  # Road: Dark Gray
+                    color = (169, 169, 169)  # road: Dark Gray
                 elif cell == 'S':
-                    color = (255, 0, 0)   # Start line: Red
+                    color = (255, 0, 0)      # start line: Red
                 pygame.draw.rect(surface, color, rect)
 
 class RaceTrackEnv:
@@ -87,77 +85,53 @@ class RaceTrackEnv:
         self.reset()
 
     def reset(self):
-        # Place the car at the start line (using continuous coordinates).
         start_r, start_c = self.track.start
-        # Convert grid cell to continuous coordinates (center of cell).
         self.car_pos = np.array([start_c + 0.5, start_r + 0.5], dtype=np.float32)
-        # For a circular track, set initial orientation tangent to the circle.
-        # At the top of the circle the tangent is horizontal (pointing right).
-        self.car_angle = 0.0  # in radians
-        # For lap detection, flag when the car leaves the start zone.
+        self.car_angle = 0.0  # tangent at start (pointing right)
         self.left_start_zone = False
-        # Count number of laps completed.
         self.laps = 0
         self.steps = 0
         return self.get_state()
 
     def step(self, action):
-        # Action mapping: 0 = turn left, 1 = go straight, 2 = turn right.
+        # Action: 0 = turn left, 1 = straight, 2 = turn right.
         turn_angle = math.radians(15)
         if action == 0:
             self.car_angle -= turn_angle
         elif action == 2:
             self.car_angle += turn_angle
-        # Always move forward by a fixed step.
         speed = 0.8
         dx = speed * math.cos(self.car_angle)
         dy = speed * math.sin(self.car_angle)
-        new_pos = self.car_pos + np.array([dx, dy], dtype=np.float32)
-        self.car_pos = new_pos
+        self.car_pos += np.array([dx, dy], dtype=np.float32)
         self.steps += 1
 
-        # Determine grid cell of car.
         grid_x = int(self.car_pos[0])
         grid_y = int(self.car_pos[1])
-        # Check boundaries.
         if not (0 <= grid_x < self.track.width and 0 <= grid_y < self.track.height):
-            reward = -50
-            done = True
-            return self.get_state(), reward, done
+            return self.get_state(), -50, True
 
         cell = self.track.grid[grid_y][grid_x]
-        # If car is on road, reward a small positive step; else, penalize.
         if cell in ['R', 'S']:
             reward = 1
         else:
-            reward = -5
-            done = True
-            return self.get_state(), reward, done
+            return self.get_state(), -5, True
 
-        # Check for lap completion.
-        # When the car is in the start cell and it has left the start zone.
         if cell == 'S' and self.left_start_zone:
-            reward += 100  # Lap reward.
+            reward += 100
             self.laps += 1
             done = True
         else:
             done = False
-
-        # Once the car leaves the start cell, mark that it has left.
         if cell != 'S':
             self.left_start_zone = True
-
-        # Also end episode if too many steps.
         if self.steps >= 500:
             done = True
 
         return self.get_state(), reward, done
 
     def get_state(self):
-        # Build a 3‑channel state representation as a numpy array (shape: [3, height, width]).
-        # Channel 0: Road mask (1 if road or start, 0 otherwise).
-        # Channel 1: Car position (a single 1 at the car’s cell).
-        # Channel 2: Start line (1 if start cell, 0 otherwise).
+        # 3-channel state: road mask, car position, start line.
         state = np.zeros((3, self.track.height, self.track.width), dtype=np.float32)
         for r in range(self.track.height):
             for c in range(self.track.width):
@@ -165,7 +139,6 @@ class RaceTrackEnv:
                     state[0, r, c] = 1.0
                 if self.track.grid[r][c] == 'S':
                     state[2, r, c] = 1.0
-        # Mark the car position.
         grid_x = int(self.car_pos[0])
         grid_y = int(self.car_pos[1])
         if 0 <= grid_y < self.track.height and 0 <= grid_x < self.track.width:
@@ -202,15 +175,14 @@ class DQN(nn.Module):
         self.fc = nn.Linear(64 * height * width, num_actions)
 
     def forward(self, x):
-        # x: (batch, channels, height, width)
         x = self.conv1(x)
         x = self.relu1(x)
-        hidden = self.conv2(x)  # Hidden activations.
+        hidden = self.conv2(x)
         x = self.relu2(hidden)
         batch_size = x.size(0)
         x_flat = x.view(batch_size, -1)
         q_values = self.fc(x_flat)
-        return q_values, x  # Return Q-values and hidden activations.
+        return q_values, x
 
 # ---------------------------
 # DQN Agent Wrapper
@@ -232,6 +204,8 @@ class DQNAgent:
         self.epsilon_decay = 0.995
         self.update_target_every = 1000
         self.step_count = 0
+        self.total_laps = 0
+        self.total_score = 0
 
     def select_action(self, state):
         self.step_count += 1
@@ -255,11 +229,8 @@ class DQNAgent:
         next_states = torch.from_numpy(next_states).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
 
-        # Compute current Q values.
         q_values, _ = self.policy_net(states)
         state_action_values = q_values.gather(1, actions)
-
-        # Compute next Q values using target network.
         with torch.no_grad():
             next_q_values, _ = self.target_net(next_states)
             max_next_q_values = next_q_values.max(1, keepdim=True)[0]
@@ -270,14 +241,11 @@ class DQNAgent:
         loss.backward()
         self.optimizer.step()
 
-        # Decay epsilon.
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
-        # Periodically update the target network.
         if self.step_count % self.update_target_every == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
-
         return loss.item()
 
 # ---------------------------
@@ -295,104 +263,95 @@ def update_frame(surface):
         current_frame = b64_frame
 
 # ---------------------------
-# Simulation Loop: Training & Demonstration
+# Simulation Loop: Ultra-Optimized Multi-Car Training & Demonstration
 # ---------------------------
 def simulation_loop():
     global current_frame
     pygame.init()
     pygame.font.init()
-    font = pygame.font.SysFont("Arial", 14)
-    # Create an off‑screen surface (with extra width for hidden-layer viz).
+    font = pygame.font.SysFont("Arial", 12)
+    # Off-screen display surface.
     screen = pygame.Surface((total_width, total_height))
 
-    # Initialize Race Track and Environment.
+    # Create a shared track and pre-render its static parts.
     track = RaceTrack(grid_width, grid_height)
-    env = RaceTrackEnv(track)
+    track_surface = pygame.Surface((grid_pixel_width, grid_pixel_height))
+    track.draw(track_surface)  # Pre-render track once.
 
-    # Set up device and agent.
+    # Create environments and agents.
+    envs = [RaceTrackEnv(track) for _ in range(NUM_CARS)]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     state_shape = (3, grid_height, grid_width)
-    num_actions = 3  # turn left, straight, turn right.
-    agent = DQNAgent(state_shape, num_actions, device)
+    num_actions = 3  # left, straight, right.
+    agents = [DQNAgent(state_shape, num_actions, device) for _ in range(NUM_CARS)]
+    states = [env.reset() for env in envs]
+    episode_scores = [0] * NUM_CARS
+    episodes_done = [0] * NUM_CARS
+    total_episodes = 300
 
-    num_episodes = 300
-    global_score = 0
-    attempt_counter = 0
+    colors = [(random.randint(50,255), random.randint(50,255), random.randint(50,255)) for _ in range(NUM_CARS)]
+    print("Ultra‑optimized training of 20 cars...")
 
-    print("Training agent on the circular race track...")
-    for ep in range(1, num_episodes + 1):
-        state = env.reset()
-        episode_score = 0
-        attempt_counter += 1
-        for step in range(500):
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit()
-
-            action = agent.select_action(state)
-            next_state, reward, done = env.step(action)
-            agent.push_transition(state, action, reward, next_state, done)
-            loss_val = agent.update()
-            state = next_state
-            episode_score += reward
-            global_score += reward
-
-            # --------- Drawing the Frame ---------
-            screen.fill((0, 0, 0))
-            # Left panel: Draw the track.
-            track.draw(screen)
-            # Draw the car (blue circle).
-            car_x = int(env.car_pos[0] * cell_size)
-            car_y = int(env.car_pos[1] * cell_size)
-            pygame.draw.circle(screen, (0, 0, 255), (car_x, car_y), cell_size // 2)
-            # Info text.
-            info_text = font.render(f"Attempt:{attempt_counter}  Steps:{step}  Score:{episode_score}  Global:{global_score}  ε:{agent.epsilon:.2f}  Laps:{env.laps}", True, (255, 255, 255))
-            screen.blit(info_text, (5, grid_pixel_height + 5))
-
-            # Right panel: Hidden layer visualization.
-            state_tensor = torch.from_numpy(state).unsqueeze(0).to(device)
-            with torch.no_grad():
-                _, hidden_activations = agent.policy_net(state_tensor)
-            hidden_np = hidden_activations.cpu().numpy()[0]  # shape: (64, H, W)
-            hidden_avg = np.mean(hidden_np, axis=0)
-            norm_hidden = (hidden_avg - hidden_avg.min()) / (np.ptp(hidden_avg) + 1e-5)
-            hidden_img = (norm_hidden * 255).astype(np.uint8)
-            hidden_img_color = np.stack([hidden_img] * 3, axis=-1)
-            hidden_surface = pygame.surfarray.make_surface(np.transpose(hidden_img_color, (1, 0, 2)))
-            hidden_panel = pygame.transform.smoothscale(hidden_surface, (hidden_panel_width, grid_pixel_height))
-            screen.blit(hidden_panel, (grid_pixel_width, 0))
-
-            update_frame(screen)
-            time.sleep(0.01)  # Faster update for smoother animation.
+    # Main training loop.
+    while any(e < total_episodes for e in episodes_done):
+        for i in range(NUM_CARS):
+            if episodes_done[i] >= total_episodes:
+                continue
+            action = agents[i].select_action(states[i])
+            next_state, reward, done = envs[i].step(action)
+            agents[i].push_transition(states[i], action, reward, next_state, done)
+            agents[i].update()
+            states[i] = next_state
+            episode_scores[i] += reward
             if done:
-                break
-        print(f"Attempt {attempt_counter} finished with score {episode_score}, laps: {env.laps}")
+                agents[i].total_laps += envs[i].laps
+                agents[i].total_score += episode_scores[i]
+                episodes_done[i] += 1
+                states[i] = envs[i].reset()
+                episode_scores[i] = 0
+        # --------- Drawing the Frame (optimized) ---------
+        screen.fill((0, 0, 0))
+        screen.blit(track_surface, (0, 0))
+        for i in range(NUM_CARS):
+            car_x = int(envs[i].car_pos[0] * cell_size)
+            car_y = int(envs[i].car_pos[1] * cell_size)
+            pygame.draw.circle(screen, colors[i], (car_x, car_y), cell_size // 2)
+        info_text = font.render(f"Episodes: {max(episodes_done)} / {total_episodes} per car", True, (255,255,255))
+        screen.blit(info_text, (5, grid_pixel_height + 5))
+        update_frame(screen)
+        eventlet.sleep(0.001)  # Minimal sleep for ultra-fast simulation
 
+    # Pick best agent by total laps.
+    best_index = max(range(NUM_CARS), key=lambda i: agents[i].total_laps)
+    print(f"Training complete! Best car #{best_index} with {agents[best_index].total_laps} laps.")
+    
     # ----- Demonstration Phase -----
-    print("Training complete! Starting demonstration with learned policy.")
-    agent.epsilon = 0.0  # Disable exploration.
-    state = env.reset()
-    for step in range(500):
+    print("Starting ultra-fast demo with the best car.")
+    demo_env = RaceTrackEnv(track)
+    demo_agent = agents[best_index]
+    demo_agent.epsilon = 0.0  # disable exploration
+    state = demo_env.reset()
+    demo_steps = 0
+    while demo_steps < 500:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit()
-        action = agent.select_action(state)
-        next_state, reward, done = env.step(action)
+        action = demo_agent.select_action(state)
+        next_state, reward, done = demo_env.step(action)
         state = next_state
 
         screen.fill((0, 0, 0))
-        track.draw(screen)
-        car_x = int(env.car_pos[0] * cell_size)
-        car_y = int(env.car_pos[1] * cell_size)
+        screen.blit(track_surface, (0, 0))
+        car_x = int(demo_env.car_pos[0] * cell_size)
+        car_y = int(demo_env.car_pos[1] * cell_size)
         pygame.draw.circle(screen, (0, 0, 255), (car_x, car_y), cell_size // 2)
-        demo_text = font.render(f"Demo Mode - Step: {step}  Laps: {env.laps}", True, (255, 255, 255))
+        demo_text = font.render(f"Demo (Car #{best_index}) - Step: {demo_steps}  Laps: {demo_env.laps}", True, (255,255,255))
         screen.blit(demo_text, (5, grid_pixel_height + 5))
         # Hidden layer visualization.
         state_tensor = torch.from_numpy(state).unsqueeze(0).to(device)
         with torch.no_grad():
-            _, hidden_activations = agent.policy_net(state_tensor)
+            _, hidden_activations = demo_agent.policy_net(state_tensor)
         hidden_np = hidden_activations.cpu().numpy()[0]
         hidden_avg = np.mean(hidden_np, axis=0)
         norm_hidden = (hidden_avg - hidden_avg.min()) / (np.ptp(hidden_avg) + 1e-5)
@@ -401,15 +360,13 @@ def simulation_loop():
         hidden_surface = pygame.surfarray.make_surface(np.transpose(hidden_img_color, (1, 0, 2)))
         hidden_panel = pygame.transform.smoothscale(hidden_surface, (hidden_panel_width, grid_pixel_height))
         screen.blit(hidden_panel, (grid_pixel_width, 0))
-
         update_frame(screen)
-        time.sleep(0.03)
-        if done:
-            break
+        eventlet.sleep(0.001)
+        demo_steps += 1
     print("Demonstration complete. Press Ctrl+C to exit.")
     while True:
         update_frame(screen)
-        time.sleep(0.1)
+        eventlet.sleep(0.01)
 
 # ---------------------------
 # Flask & SocketIO for Real-Time Streaming
@@ -419,19 +376,18 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 @app.route("/")
 def index():
-    # A simple HTML page that displays the real-time simulation.
     return render_template_string('''
     <!doctype html>
     <html>
       <head>
-         <title>Advanced Real-Time Race Track RL Simulation</title>
+         <title>Ultra-Optimized Multi-Car Race Track RL Simulation</title>
          <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
          <style>
             body { background-color: #333; color: #fff; text-align: center; }
          </style>
       </head>
       <body>
-         <h1>Advanced Real-Time Race Track RL Simulation</h1>
+         <h1>Ultra-Optimized Multi-Car Race Track RL Simulation</h1>
          <img id="frame" width="{{ width }}" height="{{ height }}" style="border: 2px solid #fff;">
          <script>
             var socket = io();
@@ -444,22 +400,15 @@ def index():
     ''', width=total_width, height=total_height)
 
 def frame_emitter():
-    # Emit the latest frame at ~30 FPS.
     while True:
-        eventlet.sleep(1/30.0)
+        eventlet.sleep(1/60.0)
         with frame_lock:
             frame_data = current_frame
         if frame_data is not None:
             socketio.emit("frame", frame_data)
 
-# ---------------------------
-# Main Entry Point
-# ---------------------------
 if __name__ == "__main__":
-    # Start the simulation loop in a background thread.
     sim_thread = threading.Thread(target=simulation_loop, daemon=True)
     sim_thread.start()
-    # Start the frame emitter background task.
     socketio.start_background_task(frame_emitter)
-    # Run the Flask-SocketIO server on port 9999.
     socketio.run(app, host="0.0.0.0", port=9999)
