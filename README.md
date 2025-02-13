@@ -1,5 +1,4 @@
-# Pong Test
-
+# A long waited project of mine
 ## Overview
 Pong Test is a simple reinforcement learning project that trains an agent to play Pong using Python and Pygame. The project implements Q-learning techniques to improve the agent's performance over time.
 
